@@ -1,14 +1,19 @@
 from __future__ import annotations
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app.db import connect
 from app.services import reconcile_service
+from app.services.gate import with_write_tx
 
 router = APIRouter(tags=["reconcile"])
 
 
 class AlignIn(BaseModel):
+    period_id: str
+
+
+class PeriodIn(BaseModel):
     period_id: str
 
 
@@ -71,6 +76,22 @@ def set_fate(variance_id: str, body: FateIn):
 @router.post("/seal")
 def seal(body: SealIn):
     return reconcile_service.seal_period(body.period_id, body.batch_id)
+
+
+@router.post("/periods")
+def create_period(body: PeriodIn):
+    def work(conn):
+        exists = conn.execute(
+            "SELECT 1 FROM periods WHERE period_id=?", (body.period_id,)
+        ).fetchone()
+        if exists:
+            raise HTTPException(409, f"账期已存在: {body.period_id}")
+        conn.execute(
+            "INSERT INTO periods(period_id,status) VALUES (?,'open')", (body.period_id,)
+        )
+        return {"period_id": body.period_id, "status": "open"}
+
+    return with_write_tx(work)
 
 
 @router.get("/periods")

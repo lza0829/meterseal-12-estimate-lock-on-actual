@@ -1,6 +1,14 @@
 from __future__ import annotations
 from app.db import connect
 
+# 全局只贯彻一种估抄锁口径，由 settings.estimate_lock_policy 决定：
+#   lock_on_actual      首笔实抄到达即锁定该表该账期估抄，纠错走订正链路
+#   editable_until_sealed 封印前估抄始终可改，改后 open 对齐批失效
+POLICY_LOCK_ON_ACTUAL = "lock_on_actual"
+POLICY_EDITABLE = "editable_until_sealed"
+VALID_POLICIES = (POLICY_LOCK_ON_ACTUAL, POLICY_EDITABLE)
+DEFAULT_POLICY = POLICY_LOCK_ON_ACTUAL
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meters (
   meter_id TEXT PRIMARY KEY,
@@ -58,15 +66,79 @@ CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+-- 实到达锁标记：仅 lock_on_actual 口径写入；一行代表该表该账期估抄已被首笔实抄锁定
+CREATE TABLE IF NOT EXISTS estimate_locks (
+  meter_id TEXT NOT NULL,
+  period_id TEXT NOT NULL,
+  locked_by_actual TEXT NOT NULL,
+  locked_at TEXT NOT NULL,
+  PRIMARY KEY (meter_id, period_id)
+);
+-- 订正链路：锁定后不允许改估抄本体，只允许追加订正，对齐仍以锁定时估抄为准
+CREATE TABLE IF NOT EXISTS estimate_corrections (
+  correction_id TEXT PRIMARY KEY,
+  meter_id TEXT NOT NULL,
+  period_id TEXT NOT NULL,
+  locked_qty REAL NOT NULL,
+  corrected_qty REAL NOT NULL,
+  reason TEXT NOT NULL,
+  doc_no TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
 """
+
+
+def _columns(conn, table: str) -> set[str]:
+    return {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def _add_column_if_missing(conn, table: str, column: str, ddl: str) -> None:
+    if column not in _columns(conn, table):
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+
+
+def migrate(conn) -> None:
+    """幂等迁移：老库补列、补表，不破坏既有数据。"""
+    # 对齐批快照记录生成时的口径与锁计数
+    _add_column_if_missing(conn, "reconcile_batches", "policy", "policy TEXT")
+    _add_column_if_missing(conn, "reconcile_batches", "locked_count", "locked_count INTEGER NOT NULL DEFAULT 0")
+    # 每条差额快照该表该账期在对齐瞬间的锁标记
+    _add_column_if_missing(conn, "variances", "estimate_locked", "estimate_locked INTEGER NOT NULL DEFAULT 0")
+
+
+def _backfill_locks(conn) -> None:
+    """默认 lock_on_actual 口径：为既有实抄补齐首笔实抄锁标记，保证口径一致。"""
+    for r in conn.execute(
+        "SELECT DISTINCT meter_id, period_id, MIN(loaded_at) AS first_at FROM actuals GROUP BY meter_id, period_id"
+    ).fetchall():
+        conn.execute(
+            """INSERT OR IGNORE INTO estimate_locks(meter_id,period_id,locked_by_actual,locked_at)
+               VALUES (?,?, (SELECT actual_id FROM actuals
+                             WHERE meter_id=? AND period_id=?
+                             ORDER BY loaded_at LIMIT 1), ?)""",
+            (r["meter_id"], r["period_id"], r["meter_id"], r["period_id"], r["first_at"]),
+        )
 
 
 def seed_if_empty() -> None:
     conn = connect()
     try:
         conn.executescript(SCHEMA)
+        migrate(conn)
+        conn.commit()
         n = conn.execute("SELECT COUNT(*) AS c FROM meters").fetchone()["c"]
         if n:
+            # 老库迁移：补齐口径设置，并在默认锁定口径下回填历史实抄锁标
+            exists = conn.execute(
+                "SELECT 1 FROM settings WHERE key='estimate_lock_policy'"
+            ).fetchone()
+            if not exists:
+                conn.execute(
+                    "INSERT INTO settings(key,value) VALUES ('estimate_lock_policy',?)",
+                    (DEFAULT_POLICY,),
+                )
+            _backfill_locks(conn)
+            conn.commit()
             return
         meters = [
             ("M-W-101", "A栋", "101", "water"),
@@ -118,6 +190,12 @@ def seed_if_empty() -> None:
         conn.execute(
             "INSERT INTO settings(key,value) VALUES ('product_title','抄表簿')"
         )
+        conn.execute(
+            "INSERT INTO settings(key,value) VALUES ('estimate_lock_policy',?)",
+            (DEFAULT_POLICY,),
+        )
+        # 默认 lock_on_actual：种子实抄即视为首笔实抄，补齐锁标记，保证口径一致
+        _backfill_locks(conn)
         # 界面不露英文：表类型仍存 water/electric 码，前端映射为中文
         conn.commit()
     finally:

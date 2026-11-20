@@ -19,8 +19,15 @@ export const api = {
   overview: () => req('/overview'),
   meters: () => req('/meters'),
   estimates: (periodId) => req('/estimates' + (periodId ? `?period_id=${periodId}` : '')),
-  actuals: (periodId) => req('/actuals' + (periodId ? `?period_id=${periodId}` : '')),
+  estimateLocks: (periodId) =>
+    req('/estimate-locks' + (periodId ? `?period_id=${periodId}` : '')),
+  corrections: (periodId) =>
+    req('/estimate-corrections' + (periodId ? `?period_id=${periodId}` : '')),
   postEstimate: (body) => req('/estimates', { method: 'POST', body: JSON.stringify(body) }),
+  reviseEstimate: (body) => req('/estimates/revise', { method: 'POST', body: JSON.stringify(body) }),
+  postCorrection: (body) =>
+    req('/estimates/corrections', { method: 'POST', body: JSON.stringify(body) }),
+  actuals: (periodId) => req('/actuals' + (periodId ? `?period_id=${periodId}` : '')),
   postActual: (body) => req('/actuals', { method: 'POST', body: JSON.stringify(body) }),
   periods: () => req('/periods'),
   align: (period_id) => req('/align', { method: 'POST', body: JSON.stringify({ period_id }) }),

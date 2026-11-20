@@ -17,8 +17,12 @@ async function submit() {
   err.value = ''; msg.value = ''
   try {
     const body = { ...form.value, doc_no: form.value.doc_no || ('实-' + Date.now()) }
-    await api.postActual(body)
-    msg.value = '实抄已装载'
+    const r = await api.postActual(body)
+    const lockHint = r.estimate_locked
+      ? (r.locked_now ? '；首笔实抄已锁定该表该账期估抄' : '；估抄锁标已存在')
+      : '；当前口径实抄不锁估抄'
+    const expireHint = r.expired_batches > 0 ? `；已作废 ${r.expired_batches} 个旧开放对齐批` : ''
+    msg.value = '实抄已装载' + lockHint + expireHint
     await load()
   } catch (e) { err.value = e.message }
 }

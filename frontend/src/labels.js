@@ -9,6 +9,11 @@ export const 命运 = {
   accept_over: '认溢',
   quarantine: '隔离',
 }
+// 锁口径必须与后端 settings.estimate_lock_policy 白名单同口径
+export const 锁口径 = {
+  lock_on_actual: '首笔实抄锁定估抄',
+  editable_until_sealed: '封印前估抄可改',
+}
 
 export function 标(map, key) {
   if (key == null || key === '') return '—'
